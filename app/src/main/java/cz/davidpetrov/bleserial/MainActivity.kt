@@ -17,6 +17,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -35,6 +39,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 class MainActivity : ComponentActivity() {
 
@@ -83,7 +89,7 @@ class MainActivity : ComponentActivity() {
                         isScanning = isScanning.value,
                         isConnected = isConnected.value,
                         deviceName = lastDeviceName.value,
-                        messages = logLines,                       // pass log list to UI
+                        messages = logLines,
                         onStartScan = { startBleScan() },
                         onStopScan = { stopBleScan() },
                         onDisconnect = { disconnectGatt() },
@@ -92,7 +98,13 @@ class MainActivity : ComponentActivity() {
                         onSendByteRed = { sendByte(20) },
                         onSendByteGreen = { sendByte(10) },
                         onSendByteLight = { sendByte(40) },
-                        onClearLog = { logLines.clear() }          // clear the log
+                        // směrové ovladače (opakované odesílání při držení)
+                        onMoveForward = { sendByte(1) },
+                        onMoveBackward = { sendByte(0) },
+                        onMoveLeft = { sendByte(3) },
+                        onMoveRight = { sendByte(4) },
+                        onMoveStop = { sendByte(2) },
+                        onClearLog = { logLines.clear() }
                     )
                 }
             }
@@ -352,17 +364,21 @@ fun MainScreen(
     onSendByteRed: () -> Unit,
     onSendByteGreen: () -> Unit,
     onSendByteLight: () -> Unit,
+    // směrové ovladače (opakovaně při držení)
+    onMoveForward: () -> Unit,
+    onMoveBackward: () -> Unit,
+    onMoveLeft: () -> Unit,
+    onMoveRight: () -> Unit,
+    onMoveStop: () -> Unit,
     onClearLog: () -> Unit
 ) {
     var msg by remember { mutableStateOf("Hello ESP32") }
 
-    // Remember and control the scroll state of the log
     val listState = rememberLazyListState()
 
-    // Auto-scroll to the latest message whenever the list grows
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1) // or use scrollToItem for instant jump
+            listState.animateScrollToItem(messages.size - 1)
         }
     }
 
@@ -404,19 +420,64 @@ fun MainScreen(
             label = { Text("Message") },
             modifier = Modifier.fillMaxWidth()
         )
+
         Spacer(Modifier.height(8.dp))
-        Row {
+
+        // Řádek: Send + barevná tlačítka (bez čísel v popiscích)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Button(onClick = { onSend(msg) }, enabled = isConnected) { Text("Send") }
             Spacer(Modifier.width(8.dp))
-            Column {   // stack control buttons vertically
-                Button(onClick = onSendByteBlue, enabled = isConnected) { Text("Send byte 30 (0x1E)") }
-                Spacer(Modifier.height(8.dp))
-                Button(onClick = onSendByteRed, enabled = isConnected) { Text("Send byte 20 (0x14)") }
-                Spacer(Modifier.height(8.dp))
-                Button(onClick = onSendByteGreen, enabled = isConnected) { Text("Send byte 10 (0x0A)") }
-                Spacer(Modifier.height(8.dp))
-                Button(onClick = onSendByteLight, enabled = isConnected) { Text("Send byte 40 (0x28)") }
-            }
+            Button(onClick = onSendByteBlue, enabled = isConnected) { Text("Blue") }
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = onSendByteRed, enabled = isConnected) { Text("Red") }
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = onSendByteGreen, enabled = isConnected) { Text("Green") }
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = onSendByteLight, enabled = isConnected) { Text("Light") }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        // D-pad: vpřed/vzad/vlevo/vpravo, Stop uprostřed
+        Text("Controls:")
+        Spacer(Modifier.height(8.dp))
+
+        // horní řada – vpřed
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            HoldRepeatButton(text = "Forward", enabled = isConnected, repeatMs = 100, onRepeat = onMoveForward)
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // prostřední řada – vlevo, stop, vpravo
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            HoldRepeatButton(text = "Left", enabled = isConnected, repeatMs = 100, onRepeat = onMoveLeft)
+            Spacer(Modifier.width(12.dp))
+            HoldRepeatButton(text = "Stop", enabled = isConnected, repeatMs = 100, onRepeat = onMoveStop)
+            Spacer(Modifier.width(12.dp))
+            HoldRepeatButton(text = "Right", enabled = isConnected, repeatMs = 100, onRepeat = onMoveRight)
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // spodní řada – vzad
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            HoldRepeatButton(text = "Backward", enabled = isConnected, repeatMs = 100, onRepeat = onMoveBackward)
         }
 
         Spacer(Modifier.height(16.dp))
@@ -424,9 +485,8 @@ fun MainScreen(
         Text("Log:")
         Spacer(Modifier.height(8.dp))
 
-        // Scrollable log list – takes the remaining height
         LazyColumn(
-            state = listState, // attach list state for programmatic scrolling
+            state = listState,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
@@ -435,13 +495,52 @@ fun MainScreen(
             items(messages) { line ->
                 Text(
                     line,
-                    maxLines = 1,                          // show one line
-                    overflow = TextOverflow.Ellipsis,      // add "…" if too long
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodySmall
                 )
-                HorizontalDivider(thickness = 0.5.dp)      // new non-deprecated divider
+                HorizontalDivider(thickness = 0.5.dp)
             }
         }
+    }
+}
+
+/**
+ * Button, který opakovaně volá [onRepeat] každých [repeatMs] ms po dobu držení.
+ * Zároveň provede akci i okamžitě (na začátku stisku).
+ */
+@Composable
+fun HoldRepeatButton(
+    text: String,
+    enabled: Boolean,
+    repeatMs: Long,
+    onRepeat: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+
+    // Když je tlačítko drženo, opakovaně posílej příkaz
+    LaunchedEffect(isPressed, enabled) {
+        if (enabled && isPressed) {
+            // okamžitá akce při stisku
+            onRepeat()
+            // dokud je drženo, opakuj po repeatMs
+            while (isActive && isPressed) {
+                delay(repeatMs)
+                if (!isPressed || !enabled) break
+                onRepeat()
+            }
+        }
+    }
+
+    Button(
+        onClick = { onRepeat() }, // krátký klik pošle jednorázově
+        enabled = enabled,
+        interactionSource = interactionSource,
+        modifier = modifier
+    ) {
+        Text(text)
     }
 }
 
@@ -469,6 +568,11 @@ fun PreviewMain() {
             onSendByteRed = {},
             onSendByteGreen = {},
             onSendByteLight = {},
+            onMoveForward = {},
+            onMoveBackward = {},
+            onMoveLeft = {},
+            onMoveRight = {},
+            onMoveStop = {},
             onClearLog = {}
         )
     }
